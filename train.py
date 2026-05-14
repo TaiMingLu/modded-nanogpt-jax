@@ -273,6 +273,13 @@ def get_mesh(config: Config):
     return mesh
 
 
+def replicate_to_mesh(pytree: PyTree, mesh: Mesh) -> PyTree:
+    return tree_map(
+        lambda x: jax.device_put(x, NamedSharding(mesh, P(*((None,) * x.ndim)))),
+        pytree,
+    )
+
+
 # ====================== optimizers ==================
 
 
@@ -674,7 +681,8 @@ def init_params(config: Config, mesh: Mesh) -> PyTree:
         block_params["lambdas"] = jax.device_put(lambdas_arr, weight_sharding)
         params["h"].append(block_params)
 
-    precomputed_params = precompute_rope(config, mesh)
+    params = replicate_to_mesh(params, mesh)
+    precomputed_params = replicate_to_mesh(precompute_rope(config, mesh), mesh)
 
     return params, precomputed_params
 
@@ -733,6 +741,7 @@ def init_optimizer(config: Config, params: PyTree, mesh: Mesh):
         adam_nonmat=adam_nonmat,
     )
     opt_state = optimizer.init(params)
+    opt_state = replicate_to_mesh(opt_state, mesh)
 
     return optimizer, opt_state
 
