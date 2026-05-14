@@ -7,13 +7,9 @@ import dataclasses
 import datetime
 
 import jax
-# Initialize JAX's distributed runtime BEFORE any other JAX call. On Cloud TPU
-# this is auto-detected (no kwargs needed) and is required on multi-host pods
-# to ensure all processes share a coordinator and compile identical programs.
-jax.distributed.initialize()
-# Multi-host: point all hosts at a SHARED compile cache so both load the
-# identical XLA program. JAX_COMPILATION_CACHE_DIR can be set to the gcsfuse
-# mount; if unset we leave caching off entirely.
+# NOTE: do NOT call jax.distributed.initialize() — Cloud TPU auto-initializes
+# the distributed runtime via libtpu; explicit init double-registers and
+# desyncs launch IDs across hosts.
 _shared_cache = os.environ.get("JAX_COMPILATION_CACHE_DIR")
 if _shared_cache:
     jax.config.update("jax_compilation_cache_dir", _shared_cache)
