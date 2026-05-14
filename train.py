@@ -7,10 +7,13 @@ import dataclasses
 import datetime
 
 import jax
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
+# Persistent XLA cache disabled on multi-host: independent host filesystems
+# can desync (one host hits cache, other recompiles → different launch IDs).
+if int(os.environ.get("JAX_DISABLE_PERSISTENT_CACHE", "0")) != 1:
+    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+    jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
 
 import jax.numpy as jnp
 from jax import jit, value_and_grad
@@ -999,12 +1002,12 @@ def train_loop(config: Config):
                 batched_y,
             )
 
-            # Sync all hosts on the train_step, then transfer metrics to host.
-            # block_until_ready ensures both hosts finish before any host reads;
-            # device_get pulls each replicated metric to numpy on the local host
-            # without triggering a cross-host gather collective.
-            jax.block_until_ready(metrics)
-            host_metrics = {k: float(np.asarray(jax.device_get(v))) for k, v in metrics.items()}
+            # process_allgather is the multihost-safe primitive: every host
+            # contributes (here all replicas have the same value) and every host
+            # gets the result, with explicit XLA-level coordination.
+            from jax.experimental import multihost_utils as _mh
+            gathered = _mh.process_allgather(metrics, tiled=False)
+            host_metrics = {k: float(np.asarray(gathered[k]).flat[0]) for k in metrics}
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
