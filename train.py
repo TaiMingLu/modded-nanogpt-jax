@@ -982,6 +982,7 @@ def train_loop(config: Config):
         val_activation_sharding = train_activation_sharding
 
         logger.msg("Starting training...")
+        last_step_time = time.time()
         for step in range(config.n_train_iters):
             entry = next(train_loader)
             global_shape = entry[2]
@@ -998,13 +999,26 @@ def train_loop(config: Config):
                 batched_y,
             )
 
-            # Read the local replicated copy of each metric; .addressable_data(0)
-            # avoids a cross-host gather collective that desyncs on multi-host.
-            host_metrics = {
-                k: (float(v.addressable_data(0)) if hasattr(v, "addressable_data") else float(v))
-                for k, v in metrics.items()
+            # Sync all hosts on the train_step, then transfer metrics to host.
+            # block_until_ready ensures both hosts finish before any host reads;
+            # device_get pulls each replicated metric to numpy on the local host
+            # without triggering a cross-host gather collective.
+            jax.block_until_ready(metrics)
+            host_metrics = {k: float(np.asarray(jax.device_get(v))) for k, v in metrics.items()}
+            now = time.time()
+            step_secs = now - last_step_time
+            last_step_time = now
+            tokens_this_step = batch_size * seq_len
+            log_payload = {
+                "step": step,
+                "loss": host_metrics.get("loss"),
+                "step_secs": step_secs,
+                "tokens_per_sec": tokens_this_step / step_secs if step_secs > 0 else 0.0,
+                "seq_len": seq_len,
+                "batch_size": batch_size,
+                "lr_frac": float(get_lr(step, config.n_warmup_iters, config.n_warmdown_iters, config.n_train_iters)),
             }
-            logger.log({"step": step, "time": datetime.datetime.now()} | host_metrics)
+            logger.log(log_payload)
             if step > 0 and (step % config.val_loss_every == 0):
                 run_evaluation(
                     step,
