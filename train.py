@@ -1006,19 +1006,14 @@ def train_loop(config: Config):
                 batched_y,
             )
 
-            # process_allgather is the multihost-safe primitive: every host
-            # contributes (here all replicas have the same value) and every host
-            # gets the result, with explicit XLA-level coordination.
-            from jax.experimental import multihost_utils as _mh
-            gathered = _mh.process_allgather(metrics, tiled=False)
-            host_metrics = {k: float(np.asarray(gathered[k]).flat[0]) for k in metrics}
+            # Force progress without reading the device-side loss yet.
+            jax.block_until_ready(params)
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
             tokens_this_step = batch_size * seq_len
             log_payload = {
                 "step": step,
-                "loss": host_metrics.get("loss"),
                 "step_secs": step_secs,
                 "tokens_per_sec": tokens_this_step / step_secs if step_secs > 0 else 0.0,
                 "seq_len": seq_len,
