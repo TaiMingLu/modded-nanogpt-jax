@@ -53,6 +53,7 @@ class Logger:
         self.logdir = None
         self.logfile = None
         self.is_master = jax.process_index() == 0
+        self.wandb = None
         if not self.is_master:
             return
         self.run_id = str(uuid.uuid4())
@@ -64,11 +65,25 @@ class Logger:
             with open(sys.argv[0]) as f2:
                 code = f2.read()
             f.write("=" * 100 + "\n" + code + "\n" + "=" * 100 + "\n")
+        if os.environ.get("WANDB_API_KEY"):
+            try:
+                import wandb
+                wandb.init(
+                    project=os.environ.get("WANDB_PROJECT", "modded-nanogpt-jax"),
+                    name=os.environ.get("WANDB_RUN_NAME", self.run_id),
+                    id=os.environ.get("WANDB_RUN_ID", self.run_id),
+                    resume="allow",
+                )
+                self.wandb = wandb
+                print(f"[wandb] initialized run {wandb.run.name} ({wandb.run.id})")
+            except Exception as e:
+                print(f"[wandb] init failed: {e}")
+                self.wandb = None
 
     def msg(self, msg: str):
         if not self.is_master:
             return
-        print(msg)
+        print(msg, flush=True)
         with open(self.logfile, "a") as f:
             f.write("[MESSAGE] " + str(msg) + "\n")
 
@@ -78,10 +93,27 @@ class Logger:
         metrics, self.prev_metrics = self.prev_metrics, metrics
         if metrics is None:
             return
+        if self.wandb is not None:
+            try:
+                wb_metrics = {}
+                for k, v in metrics.items():
+                    if k == "time":
+                        continue
+                    try:
+                        wb_metrics[k] = float(v)
+                    except Exception:
+                        pass
+                step_val = metrics.get("step")
+                if step_val is not None:
+                    self.wandb.log(wb_metrics, step=int(step_val))
+                else:
+                    self.wandb.log(wb_metrics)
+            except Exception as e:
+                print(f"[wandb] log failed: {e}")
         metrics = "  |  ".join(
             list(itertools.starmap("{}: {}".format, metrics.items()))
         )
-        print(metrics)
+        print(metrics, flush=True)
         with open(self.logfile, "a") as f:
             f.write("[METRICS (1 step stale)] " + str(metrics) + "\n")
 
@@ -507,33 +539,44 @@ def load_dataset(
     precomputed_batches = []
     token_cursor = 0
     activation_sharding = NamedSharding(mesh, P(*config.activation_sharding))
+    # Multi-host: every process walks the same global token sequence and
+    # contributes its local slice along the micro_batch axis (the "dp" sharded
+    # dim). jax.make_array_from_process_local_data assembles the global array.
+    assert config.micro_batch_size % num_processes == 0, (
+        f"micro_batch_size {config.micro_batch_size} must be divisible by "
+        f"num_processes {num_processes}"
+    )
+    local_micro = config.micro_batch_size // num_processes
+    local_start = process_rank * local_micro
+    local_stop = local_start + local_micro
     for global_step_idx in range(num_global_batches):
         shape_info = shape_schedule[global_step_idx]
         tokens_for_this_batch = shape_info["B"] * shape_info["seq_len"]
-        if global_step_idx % num_processes == process_rank:
-            seq_len = shape_info["seq_len"]
-            batch_size = shape_info["B"]
-            n_grad_acc_steps = batch_size // config.micro_batch_size
-            start_idx = token_cursor
-            end_idx = start_idx + tokens_for_this_batch + 1
+        seq_len = shape_info["seq_len"]
+        batch_size = shape_info["B"]
+        n_grad_acc_steps = batch_size // config.micro_batch_size
+        start_idx = token_cursor
+        end_idx = start_idx + tokens_for_this_batch + 1
+        if end_idx > len(all_tokens):
+            if process_rank == 0:
+                logger.msg("Cycling dataset...")
+            token_cursor = 0
+            start_idx = 0
+            end_idx = tokens_for_this_batch + 1
             if end_idx > len(all_tokens):
-                if process_rank == 0:
-                    logger.msg("Cycling dataset...")
-                token_cursor = 0
-                start_idx = 0
-                end_idx = tokens_for_this_batch + 1
-                if end_idx > len(all_tokens):
-                    raise RuntimeError(
-                        f"Not enough tokens ({len(all_tokens)}) to form even one batch of size {tokens_for_this_batch+1}."
-                    )
-            buf = all_tokens[start_idx:end_idx]
-            x = np.array(buf[:-1], dtype=np.int32).reshape(batch_size, seq_len)
-            y = np.array(buf[1:], dtype=np.int32).reshape(batch_size, seq_len)
-            batched_x = einops.rearrange(x, "(a b) ... -> a b ...", a=n_grad_acc_steps)
-            batched_y = einops.rearrange(y, "(a b) ... -> a b ...", a=n_grad_acc_steps)
-            batched_x = jax.device_put(batched_x, activation_sharding)
-            batched_y = jax.device_put(batched_y, activation_sharding)
-            precomputed_batches.append((batched_x, batched_y))
+                raise RuntimeError(
+                    f"Not enough tokens ({len(all_tokens)}) to form even one batch of size {tokens_for_this_batch+1}."
+                )
+        buf = all_tokens[start_idx:end_idx]
+        x = np.array(buf[:-1], dtype=np.int32).reshape(batch_size, seq_len)
+        y = np.array(buf[1:], dtype=np.int32).reshape(batch_size, seq_len)
+        batched_x = einops.rearrange(x, "(a b) ... -> a b ...", a=n_grad_acc_steps)
+        batched_y = einops.rearrange(y, "(a b) ... -> a b ...", a=n_grad_acc_steps)
+        # Keep as numpy local slice; conversion to global jax.Array happens
+        # lazily per-step in train_loop (cheap, avoids huge upfront sync).
+        local_x = batched_x[:, local_start:local_stop, :]
+        local_y = batched_y[:, local_start:local_stop, :]
+        precomputed_batches.append((local_x, local_y, batched_x.shape))
         token_cursor += tokens_for_this_batch
     logger.msg(
         f"Process {process_rank}/{num_processes} pre-computed {len(precomputed_batches)} batches."
@@ -834,6 +877,13 @@ def eval_step(
     return avg_loss
 
 
+def _entry_to_global(entry, sharding):
+    local_x, local_y, global_shape = entry
+    gx = jax.make_array_from_process_local_data(sharding, local_x, global_shape)
+    gy = jax.make_array_from_process_local_data(sharding, local_y, global_shape)
+    return gx, gy
+
+
 def run_evaluation(
     step: int,
     config: Config,
@@ -843,11 +893,13 @@ def run_evaluation(
     mesh: Mesh,
     logger: Logger,
     compiled_eval_fn: Callable,
+    val_activation_sharding=None,
 ):
     logger.msg(f"Running validation for step {step}...")
     val_loss_accum = 0.0
     val_steps = 0
-    for batched_x, batched_y in val_loader:
+    for entry in val_loader:
+        batched_x, batched_y = _entry_to_global(entry, val_activation_sharding)
         loss = compiled_eval_fn(params, batched_x, batched_y, precomputed_params)
         val_loss_accum += loss
         val_steps += 1
@@ -926,12 +978,17 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
+        train_activation_sharding = NamedSharding(mesh, P(*config.activation_sharding))
+        val_activation_sharding = train_activation_sharding
+
         logger.msg("Starting training...")
         for step in range(config.n_train_iters):
-            batched_x, batched_y = next(train_loader)
-            n_grad_acc, _, seq_len = batched_x.shape
-            batch_size = n_grad_acc * config.micro_batch_size
+            entry = next(train_loader)
+            global_shape = entry[2]
+            n_grad_acc, micro_batch, seq_len = global_shape
+            batch_size = micro_batch
             current_shape_key = (seq_len, batch_size, n_grad_acc)
+            batched_x, batched_y = _entry_to_global(entry, train_activation_sharding)
             aot_train_fn = compiled_train_steps[current_shape_key]
             params, opt_state, metrics = aot_train_fn(
                 params,
@@ -953,6 +1010,7 @@ def train_loop(config: Config):
                     mesh,
                     logger,
                     compiled_eval_fn,
+                    val_activation_sharding=val_activation_sharding,
                 )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
@@ -967,6 +1025,7 @@ def train_loop(config: Config):
             mesh,
             logger,
             compiled_eval_fn,
+            val_activation_sharding=val_activation_sharding,
         )
         logger.flush()
         logger.msg("Training finished.")
