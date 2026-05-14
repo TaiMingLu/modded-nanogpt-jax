@@ -998,11 +998,13 @@ def train_loop(config: Config):
                 batched_y,
             )
 
-            # All hosts must materialize metrics in lockstep so the cross-host
-            # gather op participates symmetrically; logging happens only on master.
-            host_metrics = {k: float(v) for k, v in metrics.items()}
-            if step % 10 == 9:
-                logger.log({"step": step, "time": datetime.datetime.now()} | host_metrics)
+            # Read the local replicated copy of each metric; .addressable_data(0)
+            # avoids a cross-host gather collective that desyncs on multi-host.
+            host_metrics = {
+                k: (float(v.addressable_data(0)) if hasattr(v, "addressable_data") else float(v))
+                for k, v in metrics.items()
+            }
+            logger.log({"step": step, "time": datetime.datetime.now()} | host_metrics)
             if step > 0 and (step % config.val_loss_every == 0):
                 run_evaluation(
                     step,
