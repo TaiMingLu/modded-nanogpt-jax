@@ -49,6 +49,24 @@ import collections.abc
 PyTree = Any
 
 
+# Background heartbeat: prints every 30s so SSH sessions don't idle-disconnect
+# during long silent JAX compiles. Started at module import time.
+def _start_heartbeat():
+    import threading
+    def _beat():
+        i = 0
+        while True:
+            time.sleep(30)
+            i += 1
+            try:
+                print(f"[heartbeat] alive {i*30}s pid={os.getpid()}", flush=True)
+            except Exception:
+                return
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+_start_heartbeat()
+
+
 # ======================== utils ========================
 
 
