@@ -988,6 +988,12 @@ def train_loop(config: Config):
             n_grad_acc, micro_batch, seq_len = global_shape
             batch_size = n_grad_acc * micro_batch
             current_shape_key = (seq_len, batch_size, n_grad_acc)
+            if step == 0:
+                logger.msg(
+                    f"DEBUG step0 global_shape={global_shape} n_grad_acc={n_grad_acc} "
+                    f"micro_batch={micro_batch} seq_len={seq_len} batch_size={batch_size} "
+                    f"shape_key={current_shape_key} dict_keys={sorted(compiled_train_steps.keys())}"
+                )
             batched_x, batched_y = _entry_to_global(entry, train_activation_sharding)
             aot_train_fn = compiled_train_steps[current_shape_key]
             params, opt_state, metrics = aot_train_fn(
