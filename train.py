@@ -935,49 +935,14 @@ def train_loop(config: Config):
             train_step, static_argnames=("config", "optimizer"), donate_argnums=(1, 3)
         )
         jitted_eval_step = jit(eval_step, static_argnames=("config",))
-        logger.msg("Determining all unique training shapes...")
-        train_shapes = {
-            _get_shape_for_step(s, config) for s in range(config.n_train_iters)
-        }
         val_config = dataclasses.replace(config, input_bin=config.input_val_bin)
-        val_seq_len = val_config.max_sequence_length
-        total_tokens = val_config.batch_size * val_config.min_sequence_length
-        val_B = (
-            total_tokens // val_seq_len // val_config.micro_batch_size
-        ) * val_config.micro_batch_size
-        val_B = max(val_B, val_config.micro_batch_size)
-        val_n_grad_acc = val_B // val_config.micro_batch_size
-        val_shape = (val_seq_len, val_B, val_n_grad_acc)
-        train_shapes.add(val_shape)
-        logger.msg("Starting Ahead-of-Time (AOT) compilation for all shapes...")
-        compiled_train_steps = {}
-        compiled_eval_fn = None
         activation_sharding = NamedSharding(mesh, P(*config.activation_sharding))
-        for seq_len, batch_size, n_grad_acc_steps in sorted(list(train_shapes)):
-            shape_key = (seq_len, batch_size, n_grad_acc_steps)
-            logger.msg(
-                f"AOT compiling for seq_len={seq_len}, B={batch_size}, grad_acc={n_grad_acc_steps}..."
-            )
-            dummy_x_shape = (n_grad_acc_steps, config.micro_batch_size, seq_len)
-            dummy_x = jnp.zeros(dummy_x_shape, dtype=jnp.int32)
-            dummy_y = jnp.zeros_like(dummy_x)
-            dummy_x = jax.device_put(dummy_x, activation_sharding)
-            dummy_y = jax.device_put(dummy_y, activation_sharding)
-            compiled_fn = jitted_train_step.lower(
-                config,
-                params,
-                precomputed_params,
-                opt_state,
-                optimizer,
-                dummy_x,
-                dummy_y,
-            ).compile()
-            compiled_train_steps[shape_key] = compiled_fn
-            if shape_key == val_shape:
-                compiled_eval_fn = jitted_eval_step.lower(
-                    params, dummy_x, dummy_y, precomputed_params, config
-                ).compile()
-        logger.msg("AOT compilation finished for all function variants.")
+        # Skip AOT compile (.lower().compile()): on multi-host pods AOT was
+        # producing host-divergent launch IDs. Plain JIT recompiles per shape
+        # on first call, then caches in-process; deterministic across hosts.
+        logger.msg("AOT compile skipped — using plain jit (compiles on first call per shape).")
+        compiled_train_steps = None  # unused
+        compiled_eval_fn = jitted_eval_step
 
         # data loading
         logger.msg("Pre-computing and loading all training batches...")
@@ -996,14 +961,14 @@ def train_loop(config: Config):
             batched_x, batched_y = next(train_loader)
             n_grad_acc, _, seq_len = batched_x.shape
             batch_size = n_grad_acc * config.micro_batch_size
-            current_shape_key = (seq_len, batch_size, n_grad_acc)
-            aot_train_fn = compiled_train_steps[current_shape_key]
             if step < 5:
                 logger.msg(f"[trace] before train_step {step}")
-            params, opt_state, metrics = aot_train_fn(
+            params, opt_state, metrics = jitted_train_step(
+                config,
                 params,
                 precomputed_params,
                 opt_state,
+                optimizer,
                 batched_x,
                 batched_y,
             )
