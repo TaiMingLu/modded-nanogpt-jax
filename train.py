@@ -986,7 +986,7 @@ def train_loop(config: Config):
             entry = next(train_loader)
             global_shape = entry[2]
             n_grad_acc, micro_batch, seq_len = global_shape
-            batch_size = micro_batch
+            batch_size = n_grad_acc * micro_batch
             current_shape_key = (seq_len, batch_size, n_grad_acc)
             batched_x, batched_y = _entry_to_global(entry, train_activation_sharding)
             aot_train_fn = compiled_train_steps[current_shape_key]
