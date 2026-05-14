@@ -584,11 +584,16 @@ def load_dataset(
         y = np.array(buf[1:], dtype=np.int32).reshape(batch_size, seq_len)
         batched_x = einops.rearrange(x, "(a b) ... -> a b ...", a=n_grad_acc_steps)
         batched_y = einops.rearrange(y, "(a b) ... -> a b ...", a=n_grad_acc_steps)
-        # Keep as numpy local slice; conversion to global jax.Array happens
-        # lazily per-step in train_loop (cheap, avoids huge upfront sync).
+        global_shape = batched_x.shape
         local_x = batched_x[:, local_start:local_stop, :]
         local_y = batched_y[:, local_start:local_stop, :]
-        precomputed_batches.append((local_x, local_y, batched_x.shape))
+        batched_x = jax.make_array_from_process_local_data(
+            activation_sharding, local_x, global_shape
+        )
+        batched_y = jax.make_array_from_process_local_data(
+            activation_sharding, local_y, global_shape
+        )
+        precomputed_batches.append((batched_x, batched_y))
         token_cursor += tokens_for_this_batch
     logger.msg(
         f"Process {process_rank}/{num_processes} pre-computed {len(precomputed_batches)} batches."
@@ -891,13 +896,6 @@ def eval_step(
     return avg_loss
 
 
-def _entry_to_global(entry, sharding):
-    local_x, local_y, global_shape = entry
-    gx = jax.make_array_from_process_local_data(sharding, local_x, global_shape)
-    gy = jax.make_array_from_process_local_data(sharding, local_y, global_shape)
-    return gx, gy
-
-
 def run_evaluation(
     step: int,
     config: Config,
@@ -907,13 +905,11 @@ def run_evaluation(
     mesh: Mesh,
     logger: Logger,
     compiled_eval_fn: Callable,
-    val_activation_sharding=None,
 ):
     logger.msg(f"Running validation for step {step}...")
     val_loss_accum = 0.0
     val_steps = 0
-    for entry in val_loader:
-        batched_x, batched_y = _entry_to_global(entry, val_activation_sharding)
+    for batched_x, batched_y in val_loader:
         loss = compiled_eval_fn(params, batched_x, batched_y, precomputed_params)
         val_loss_accum += loss
         val_steps += 1
@@ -992,20 +988,15 @@ def train_loop(config: Config):
         val_batches = load_dataset(val_config, logger, mesh, is_training=False)
         logger.msg(f"Loaded {len(val_batches)} validation batches for this process.")
 
-        train_activation_sharding = NamedSharding(mesh, P(*config.activation_sharding))
-        val_activation_sharding = train_activation_sharding
-
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
-            if step < 5 or step % 50 == 0:
+            if step < 5:
                 logger.msg(f"[trace] enter step {step}")
-            entry = next(train_loader)
-            global_shape = entry[2]
-            n_grad_acc, micro_batch, seq_len = global_shape
-            batch_size = n_grad_acc * micro_batch
+            batched_x, batched_y = next(train_loader)
+            n_grad_acc, _, seq_len = batched_x.shape
+            batch_size = n_grad_acc * config.micro_batch_size
             current_shape_key = (seq_len, batch_size, n_grad_acc)
-            batched_x, batched_y = _entry_to_global(entry, train_activation_sharding)
             aot_train_fn = compiled_train_steps[current_shape_key]
             if step < 5:
                 logger.msg(f"[trace] before train_step {step}")
@@ -1016,10 +1007,6 @@ def train_loop(config: Config):
                 batched_x,
                 batched_y,
             )
-            if step < 5:
-                logger.msg(f"[trace] after train_step {step}, before block_until_ready")
-
-            # Force progress without reading the device-side loss yet.
             jax.block_until_ready(params)
             if step < 5:
                 logger.msg(f"[trace] step {step} block_until_ready returned")
@@ -1046,7 +1033,6 @@ def train_loop(config: Config):
                     mesh,
                     logger,
                     compiled_eval_fn,
-                    val_activation_sharding=val_activation_sharding,
                 )
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
@@ -1061,7 +1047,6 @@ def train_loop(config: Config):
             mesh,
             logger,
             compiled_eval_fn,
-            val_activation_sharding=val_activation_sharding,
         )
         logger.flush()
         logger.msg("Training finished.")
