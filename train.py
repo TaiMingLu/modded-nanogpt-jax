@@ -991,6 +991,8 @@ def train_loop(config: Config):
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
+            if step < 5 or step % 50 == 0:
+                logger.msg(f"[trace] enter step {step}")
             entry = next(train_loader)
             global_shape = entry[2]
             n_grad_acc, micro_batch, seq_len = global_shape
@@ -998,6 +1000,8 @@ def train_loop(config: Config):
             current_shape_key = (seq_len, batch_size, n_grad_acc)
             batched_x, batched_y = _entry_to_global(entry, train_activation_sharding)
             aot_train_fn = compiled_train_steps[current_shape_key]
+            if step < 5:
+                logger.msg(f"[trace] before train_step {step}")
             params, opt_state, metrics = aot_train_fn(
                 params,
                 precomputed_params,
@@ -1005,9 +1009,13 @@ def train_loop(config: Config):
                 batched_x,
                 batched_y,
             )
+            if step < 5:
+                logger.msg(f"[trace] after train_step {step}, before block_until_ready")
 
             # Force progress without reading the device-side loss yet.
             jax.block_until_ready(params)
+            if step < 5:
+                logger.msg(f"[trace] step {step} block_until_ready returned")
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
