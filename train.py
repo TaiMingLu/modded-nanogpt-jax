@@ -7,6 +7,10 @@ import dataclasses
 import datetime
 
 import jax
+# Initialize JAX's distributed runtime BEFORE any other JAX call. On Cloud TPU
+# this is auto-detected (no kwargs needed) and is required on multi-host pods
+# to ensure all processes share a coordinator and compile identical programs.
+jax.distributed.initialize()
 # Persistent XLA cache disabled on multi-host: independent host filesystems
 # can desync (one host hits cache, other recompiles → different launch IDs).
 if int(os.environ.get("JAX_DISABLE_PERSISTENT_CACHE", "0")) != 1:
