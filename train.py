@@ -11,10 +11,12 @@ import jax
 # this is auto-detected (no kwargs needed) and is required on multi-host pods
 # to ensure all processes share a coordinator and compile identical programs.
 jax.distributed.initialize()
-# Persistent XLA cache disabled on multi-host: independent host filesystems
-# can desync (one host hits cache, other recompiles → different launch IDs).
-if int(os.environ.get("JAX_DISABLE_PERSISTENT_CACHE", "0")) != 1:
-    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+# Multi-host: point all hosts at a SHARED compile cache so both load the
+# identical XLA program. JAX_COMPILATION_CACHE_DIR can be set to the gcsfuse
+# mount; if unset we leave caching off entirely.
+_shared_cache = os.environ.get("JAX_COMPILATION_CACHE_DIR")
+if _shared_cache:
+    jax.config.update("jax_compilation_cache_dir", _shared_cache)
     jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
     jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
     jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
