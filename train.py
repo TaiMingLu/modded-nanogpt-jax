@@ -928,7 +928,7 @@ def run_evaluation(
     val_loss_accum = 0.0
     val_steps = 0
     for batched_x, batched_y in val_loader:
-        loss = compiled_eval_fn(params, batched_x, batched_y, precomputed_params)
+        loss = compiled_eval_fn(params, batched_x, batched_y, precomputed_params, config)
         val_loss_accum += loss
         val_steps += 1
     if val_steps == 0:
