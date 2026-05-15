@@ -220,6 +220,15 @@ class Config:
     val_tokens: int = 10485760
     save_every: int = 0
 
+    # Speedrun track configuration:
+    #   - main track (default): run for n_train_iters steps, report final val_loss.
+    #   - optimization track: stop as soon as val_loss <= target_val_loss is hit
+    #     and report the step at which we crossed; sequence length should be
+    #     fixed (no warmup) and batch size should match the upstream baseline.
+    target_val_loss: float = 3.28
+    early_stop_on_target: bool = False
+    fixed_sequence_length: bool = False
+
     # input sizes
     batch_size: int = 8 * 64  # batch size for min_sequence_length
     micro_batch_size: int = 16
@@ -504,16 +513,22 @@ def create_optimizer_map(params):
 
 
 def _get_shape_for_step(step: int, config: Config):
-    available_seq_lens = np.arange(
-        config.min_sequence_length,
-        config.max_sequence_length + 1,
-        config.sequence_warmup_intervals,
-    )
-    if config.max_sequence_length not in available_seq_lens:
-        available_seq_lens = np.append(available_seq_lens, config.max_sequence_length)
-    n_lens = len(available_seq_lens)
-    idx = int((step / config.n_train_iters) * n_lens)
-    current_seq_len = available_seq_lens[idx]
+    if config.fixed_sequence_length:
+        # Optimization track: no sequence-length warmup; train at one fixed
+        # length so per-step compute (and effective tokens-per-step) stays
+        # constant for the whole run.
+        current_seq_len = config.min_sequence_length
+    else:
+        available_seq_lens = np.arange(
+            config.min_sequence_length,
+            config.max_sequence_length + 1,
+            config.sequence_warmup_intervals,
+        )
+        if config.max_sequence_length not in available_seq_lens:
+            available_seq_lens = np.append(available_seq_lens, config.max_sequence_length)
+        n_lens = len(available_seq_lens)
+        idx = int((step / config.n_train_iters) * n_lens)
+        current_seq_len = available_seq_lens[idx]
     total_tokens = config.batch_size * config.min_sequence_length
     current_B = total_tokens // current_seq_len
     current_B = (current_B // config.micro_batch_size) * config.micro_batch_size
@@ -934,10 +949,17 @@ def run_evaluation(
     if val_steps == 0:
         if step == config.val_loss_every or step >= config.n_train_iters - 1:
             logger.msg("Warning: Validation loader was empty, no validation was run.")
-        return
+        return None
     final_val_loss = val_loss_accum / val_steps
+    # final_val_loss is a sharded jax.Array; pull the local addressable copy
+    # to a host float so we can compare against config.target_val_loss.
+    if hasattr(final_val_loss, "addressable_data"):
+        final_val_loss = float(np.asarray(final_val_loss.addressable_data(0)))
+    else:
+        final_val_loss = float(final_val_loss)
     logger.log({"step": step, "val_loss": final_val_loss})
-    logger.msg(f"Validation finished for step {step}.")
+    logger.msg(f"Validation finished for step {step}: val_loss={final_val_loss:.4f}")
+    return final_val_loss
 
 
 def train_loop(config: Config):
@@ -1002,8 +1024,9 @@ def train_loop(config: Config):
                 "batch_size": batch_size,
             }
             logger.log(log_payload)
+            target_reached_step = None
             if step > 0 and (step % config.val_loss_every == 0):
-                run_evaluation(
+                val_loss = run_evaluation(
                     step,
                     config,
                     params,
@@ -1013,6 +1036,23 @@ def train_loop(config: Config):
                     logger,
                     compiled_eval_fn,
                 )
+                if (
+                    config.early_stop_on_target
+                    and val_loss is not None
+                    and val_loss <= config.target_val_loss
+                ):
+                    logger.msg(
+                        f"[optimization-track] target reached: val_loss "
+                        f"{val_loss:.4f} <= {config.target_val_loss} at step {step}"
+                    )
+                    logger.log({
+                        "track": "optimization",
+                        "target_val_loss": config.target_val_loss,
+                        "reached_val_loss": val_loss,
+                        "reached_at_step": step,
+                    })
+                    target_reached_step = step
+                    break
             if config.save_every > 0 and step > 0 and (step % config.save_every == 0):
                 logger.dump(step, params, opt_state, config)
         logger.flush()
@@ -1034,4 +1074,34 @@ def train_loop(config: Config):
 
 if __name__ == "__main__":
     config = Config()
+    # Track selection via env var. "main" is the wall-clock speedrun (default,
+    # what train.py was originally tuned for). "optimization" stops as soon
+    # as val_loss <= target_val_loss is observed and reports the step count.
+    track = os.environ.get("TRACK", "main").lower()
+    if track == "optimization":
+        # Optimization-track preset:
+        #   - early stop when target val loss is reached
+        #   - fixed sequence length (no warmup) so per-step tokens are constant
+        #   - validate often so we don't overcount steps past the threshold
+        #   - generous step budget; we'll break out early when we hit target
+        # Note: for an OFFICIAL optimization-track entry, also confirm that
+        # config.batch_size matches the upstream baseline (modded-nanogpt's
+        # train_gpt.py). The arch fields here already match the baseline.
+        config = dataclasses.replace(
+            config,
+            early_stop_on_target=True,
+            fixed_sequence_length=True,
+            val_loss_every=int(os.environ.get("VAL_EVERY", "25")),
+            n_train_iters=int(os.environ.get("MAX_STEPS", "10000")),
+        )
+        print(
+            f"[track] OPTIMIZATION TRACK enabled "
+            f"(early stop at val_loss <= {config.target_val_loss}, "
+            f"fixed seq_len={config.min_sequence_length}, "
+            f"validate every {config.val_loss_every} steps, "
+            f"max_steps={config.n_train_iters})",
+            flush=True,
+        )
+    else:
+        print(f"[track] MAIN (wall-clock) track", flush=True)
     train_loop(config)

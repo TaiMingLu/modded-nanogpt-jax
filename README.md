@@ -70,10 +70,18 @@ Data lands in `fineweb10B/` next to the script.
 ### 3. Train
 
 ```bash
+# Main track (wall-clock speedrun) — default:
 python train.py
+
+# Optimization track (minimum steps to hit val_loss ≤ 3.28):
+TRACK=optimization python train.py
+# optional knobs (defaults shown):
+TRACK=optimization VAL_EVERY=25 MAX_STEPS=10000 python train.py
 ```
 
-AOT compilation runs first (1-3 minutes per unique input shape, cached to `/tmp/jax_cache`), then the training loop. Logs, metrics, and a final checkpoint are written under `logs/<run_id>/`.
+In **main-track** mode the script runs for `n_train_iters` steps and reports the final val_loss. In **optimization-track** mode it fixes the sequence length (no warmup), validates every `VAL_EVERY` steps, and **stops as soon as val_loss ≤ `target_val_loss` (3.28)** is observed — logging the step count at which the target was reached. For an OFFICIAL optimization-track entry, also confirm `Config.batch_size` matches the upstream baseline (modded-nanogpt's `train_gpt.py`); the architecture fields here already match.
+
+Logs, metrics, and a final checkpoint are written under `logs/<run_id>/`.
 
 ## How to run (multi-host: TPU v5p-16, v5p-64, v6e-64, etc.)
 
