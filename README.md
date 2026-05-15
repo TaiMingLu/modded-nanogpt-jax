@@ -8,16 +8,29 @@ A community **speedrun competition** for training a small GPT-2-style language m
 
 ### The rules
 
-The success criterion is binary and simple:
+The competition has **two tracks**, both targeting the same validation loss but optimizing different things.
+
+#### Main track — minimize wall-clock time
 
 > **Reach mean validation loss ≤ 3.28 on FineWeb10B in the shortest possible wall-clock time.**
 
-A few things to know about how the competition is scored (from the upstream repo):
-
 - **Measured in wall-clock minutes**, not training steps. Optimizing for fewer steps doesn't help if your steps are slower.
 - **Records are NOT normalized across hardware.** To beat a record, you must run on the same machine as the prior record-holder. There is no cross-hardware leaderboard.
-- The original speedrun runs on **8× NVIDIA H100 GPUs**; the current upstream record is ~1.4 minutes.
-- This JAX port targets **8-chip Cloud TPUs** instead — the H100 record times don't apply.
+- The original main-track runs on **8× NVIDIA H100 GPUs**; the current upstream record is ~1.4 minutes.
+- This JAX port targets **8-chip Cloud TPUs** instead — the H100 wall-clock records don't apply.
+
+#### Optimization track — minimize steps
+
+From the upstream repo:
+
+> *"Besides the main track, there is also an optimization track where we try to minimize steps subject to fixed arch/data/bsz and with unlimited wallclock budget."*
+
+- **Minimizes the number of training steps** to reach val_loss ≤ 3.28.
+- **Architecture, data, and batch size are fixed** — you can only change the optimizer and training schedule (LR schedule, momentum, etc.).
+- **Unlimited wall-clock budget** — slow steps are fine if there are fewer of them.
+- **Hardware-independent** — since you're counting steps with a fixed batch size, the score is comparable across machines.
+
+This repo's `train.py` is set up for the main track on TPU, not the optimization track. Either could be pursued by tweaking the script.
 
 ### Reference numbers (TPU)
 
