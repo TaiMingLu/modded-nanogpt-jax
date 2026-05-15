@@ -974,13 +974,9 @@ def train_loop(config: Config):
         logger.msg("Starting training...")
         last_step_time = time.time()
         for step in range(config.n_train_iters):
-            if step < 5:
-                logger.msg(f"[trace] enter step {step}")
             batched_x, batched_y = next(train_loader)
             n_grad_acc, _, seq_len = batched_x.shape
             batch_size = n_grad_acc * config.micro_batch_size
-            if step < 5:
-                logger.msg(f"[trace] before train_step {step}")
             params, opt_state, metrics = jitted_train_step(
                 config,
                 params,
@@ -990,20 +986,20 @@ def train_loop(config: Config):
                 batched_x,
                 batched_y,
             )
-            jax.block_until_ready(params)
-            if step < 5:
-                logger.msg(f"[trace] step {step} block_until_ready returned")
+            # Read loss from local addressable shard (replicated scalar; no
+            # cross-host gather). Forces a host sync, which also paces the loop.
+            loss_val = float(np.asarray(metrics["loss"].addressable_data(0)))
             now = time.time()
             step_secs = now - last_step_time
             last_step_time = now
             tokens_this_step = batch_size * seq_len
             log_payload = {
                 "step": step,
+                "loss": loss_val,
                 "step_secs": step_secs,
                 "tokens_per_sec": tokens_this_step / step_secs if step_secs > 0 else 0.0,
                 "seq_len": seq_len,
                 "batch_size": batch_size,
-                "lr_frac": float(get_lr(step, config.n_warmup_iters, config.n_warmdown_iters, config.n_train_iters)),
             }
             logger.log(log_payload)
             if step > 0 and (step % config.val_loss_every == 0):
