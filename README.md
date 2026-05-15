@@ -1,36 +1,36 @@
 # Modded-NanoGPT-JAX
 
-A pure-JAX port of [Keller Jordan's modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) speedrun, optimized for Google TPUs. Trains a GPT-2-style language model (12 layers, ~125M parameters) on the FineWeb10B dataset to a held-out validation loss of **≤ 3.28** in the shortest wall-clock time possible.
-
-The training script is self-contained in `train.py` and is written using core JAX APIs — no Flax, Optax, or Orbax — in the spirit of the original speedrun.
-
-For the original write-up on the porting process, optimizations, and performance analysis, see the blog post: [The modded nanogpt speedrun, but in JAX and on TPUs](https://nor-blog.pages.dev/posts/2025-08-21-modded-nanogpt-jax/).
+A pure-JAX port of [Keller Jordan's modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) speedrun, targeting Google Cloud TPUs.
 
 ## What this is
 
-A speedrun benchmark for training technique. The model itself is a small GPT-2-style transformer with several modern tweaks:
+A community **speedrun competition** for training a small GPT-2-style language model (~125M parameters, 12 layers) with modern tweaks: the Muon optimizer for matrix parameters, RoPE, QK-norm, U-Net-style skip connections between encoder and decoder halves, logit softcap, and sequence-length warmup from 1024 → 2048 tokens.
 
-- **Muon optimizer** for matrix-valued parameters, **Adam** for embeddings, LM head, and scalar parameters
-- Rotary position embeddings (RoPE)
-- QK-norm
-- U-Net-style skip connections between encoder and decoder halves
-- Logit softcap
-- Sequence-length warmup from 1024 → 2048 tokens over training
-- Ahead-of-time XLA compilation for each unique input shape
-- Pure data-parallel sharding via `jax.NamedSharding`
+### The rules
 
-Success is binary: hit val_loss ≤ 3.28 by the end of the run. The exercise is in the optimization technique (architecture, optimizer choice, sharding, compilation strategy), not raw model quality.
+The success criterion is binary and simple:
 
-## Performance
+> **Reach mean validation loss ≤ 3.28 on FineWeb10B in the shortest possible wall-clock time.**
 
-| Hardware | Hosts | Wall clock | val_loss | Tokens/sec |
+A few things to know about how the competition is scored (from the upstream repo):
+
+- **Measured in wall-clock minutes**, not training steps. Optimizing for fewer steps doesn't help if your steps are slower.
+- **Records are NOT normalized across hardware.** To beat a record, you must run on the same machine as the prior record-holder. There is no cross-hardware leaderboard.
+- The original speedrun runs on **8× NVIDIA H100 GPUs**; the current upstream record is ~1.4 minutes.
+- This JAX port targets **8-chip Cloud TPUs** instead — the H100 record times don't apply.
+
+### Reference numbers (TPU)
+
+| Hardware | Hosts | Wall clock | val_loss | Notes |
 |---|---|---|---|---|
-| TPU v6e-8 (single host)  | 1 | ~10 min | ≤ 3.28 | ~1.4M |
-| TPU v5p-16 (multi-host)  | 2 | ~13 min | 3.276  | ~1.18M |
+| TPU v6e-8 (single-host) | 1 | ~10 min | ≤ 3.28 | The blog's reference run; what `train.py` was originally tuned for |
+| TPU v5p-16 (multi-host) | 2 | ~13 min | 3.276 | This work; 8 chips total split across 2 hosts |
 
-Default config: 1675 training steps, batch 512 at seq_len 1024 / batch 256 at seq_len 2048, 16 micro-batches, ~880M training tokens consumed.
+These two numbers are **not directly comparable** in the speedrun sense — different chip generations, plus the v5p-16 run pays multi-host coordination overhead the v6e-8 run does not. They're listed as data points, not leaderboard entries.
 
-## How to run (single-host: v6e-8)
+For the original write-up on the porting process, see the blog post: [The modded nanogpt speedrun, but in JAX and on TPUs](https://nor-blog.pages.dev/posts/2025-08-21-modded-nanogpt-jax/).
+
+## How to run (single-host: TPU v6e-8)
 
 ### 1. Setup
 
@@ -58,11 +58,11 @@ Data lands in `fineweb10B/` next to the script.
 python train.py
 ```
 
-AOT compilation runs first (1-3 minutes per unique shape, cached to `/tmp/jax_cache`), then the training loop. Logs, metrics, and a final checkpoint are written under `logs/<run_id>/`.
+AOT compilation runs first (1-3 minutes per unique input shape, cached to `/tmp/jax_cache`), then the training loop. Logs, metrics, and a final checkpoint are written under `logs/<run_id>/`.
 
-## How to run (multi-host: v5p-16, v5p-64, v6e-64, etc.)
+## How to run (multi-host: TPU v5p-16, v5p-64, v6e-64, etc.)
 
-**Multi-host requires a different setup than the single-host instructions above.** The upstream `train.py` was originally written for v6e-8 and several issues need to be addressed (data loader, sharding, compile path, libtpu version). The fixes are already in this repo's `train.py`.
+**Multi-host requires a different setup than the single-host instructions above.** The upstream `train.py` was originally written for v6e-8 (single host) and several issues need to be addressed: the data loader, sharding of model state, the compile path, and the libtpu version. The fixes are already in this repo's `train.py`.
 
 **Required: pin the JAX version.** The default `jax[tpu]` resolves to a libtpu version with a deterministic segfault on multi-host. Use:
 
@@ -75,16 +75,16 @@ huggingface_hub
 wandb
 ```
 
-For the full multi-host recipe, including jobman orchestration, the GCS-bucket pattern for data and code, the multi-host JAX fundamentals you need to know, and a complete diagnostic playbook, see:
+For the full multi-host recipe, including [jobman](https://github.com/Zephyr271828/jobman) orchestration, the GCS-bucket pattern for data and code, the multi-host JAX fundamentals, and a complete diagnostic playbook, see:
 
 📖 **[`MULTIHOST_TPU_GUIDE.md`](MULTIHOST_TPU_GUIDE.md)** — extensively detailed lab notebook covering:
 
-- The final working setup recipe
+- Final working setup recipe
 - Multi-host JAX fundamentals (process/device distinction, sharding, compile determinism)
-- The full debugging journey with every dead end documented
+- Full debugging journey with every dead end documented
 - Things that did not work and why (table of 14 attempts)
 - The fix that actually worked
-- Operational gotchas with [jobman](https://github.com/Zephyr271828/jobman) + existing TPUs
+- Operational gotchas with jobman + existing TPUs
 - Diagnostic commands and a minimal multi-host sanity test
 - Hard rules for working with TPUs without breaking them
 
@@ -111,7 +111,7 @@ If `WANDB_API_KEY` is set in the environment, the script also logs to Weights & 
 
 ## Acknowledgments
 
-A direct port and adaptation of the incredible work done by the open-source community on the original NanoGPT speedrun.
+A direct port and adaptation of the work done by the open-source community on the original NanoGPT speedrun.
 
 - **Andrej Karpathy** for [NanoGPT](https://github.com/karpathy/nanogpt), which started it all
 - **Keller Jordan and all contributors** to the [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) repository for pioneering architecture and optimizer improvements
