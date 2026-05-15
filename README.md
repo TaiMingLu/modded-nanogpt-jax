@@ -2,6 +2,8 @@
 
 A pure-JAX port of [Keller Jordan's modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) speedrun, targeting Google Cloud TPUs.
 
+> **Based on prior work.** All credit for the speedrun benchmark, the model architecture choices, the Muon optimizer, and the training recipe goes to **Keller Jordan and the [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) contributors**, building on **Andrej Karpathy's [NanoGPT](https://github.com/karpathy/nanogpt)**. The JAX port and the original blog write-up are by **Nor** ([blog post](https://nor-blog.pages.dev/posts/2025-08-21-modded-nanogpt-jax/)). This repository extends that work with multi-host TPU support and a detailed debugging guide.
+
 ## What this is
 
 A community **speedrun competition** for training a small GPT-2-style language model (~125M parameters, 12 layers) with modern tweaks: the Muon optimizer for matrix parameters, RoPE, QK-norm, U-Net-style skip connections between encoder and decoder halves, logit softcap, and sequence-length warmup from 1024 → 2048 tokens.
